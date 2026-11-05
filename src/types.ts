@@ -167,6 +167,30 @@ export interface AppConfig {
   ssh: SshConfig;
   pipeline: PipelineConfig;
   api: ApiConfig;
+  deeluge: DeelugeConfig;
+}
+
+/**
+ * The categorizer as a multi-tenant Deeluge app (src/deeluge/, src/tenancy/).
+ * Organizations, their signing secrets, their workspaces' keys and the
+ * categorizer API keys all live in the database; these are only the
+ * service-wide settings.
+ */
+export interface DeelugeConfig {
+  /** Operator keys from the environment: full access to the management API. */
+  adminKeys: string[];
+  /** Encrypts signing secrets and workspace API keys at rest (AES-256-GCM). */
+  encryptionKey: string | undefined;
+  /** This service's public https address, used in manifests. */
+  publicUrl: string | undefined;
+  /** Records categorized at once in the background, across all organizations. */
+  concurrency: number;
+  /** POST /v1/registrations without an admin key (anyone may sign up). */
+  openSignup: boolean;
+  /** Defaults for the manifest's developer block. */
+  developer: { name: string; url: string | undefined; email: string | undefined };
+  iconUrl: string | undefined;
+  homepageUrl: string | undefined;
 }
 
 /* ------------------------------------------------------------------ */

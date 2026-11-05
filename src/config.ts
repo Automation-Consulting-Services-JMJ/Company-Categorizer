@@ -202,6 +202,26 @@ export const config: AppConfig = {
     waitForInflightMs: Math.max(0, num('API_WAIT_FOR_INFLIGHT_MS', 120_000)),
     maxBodyBytes: 1_048_576,
   },
+  deeluge: {
+    adminKeys: (opt('ADMIN_API_KEY') ?? '')
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean),
+    encryptionKey: opt('SECRETS_ENCRYPTION_KEY'),
+    publicUrl: opt('PUBLIC_URL')?.replace(/\/+$/, ''),
+    concurrency: Math.max(
+      1,
+      Math.floor(num('DEELUGE_CONCURRENCY', num('API_CONCURRENCY', num('PIPELINE_CONCURRENCY', 4))))
+    ),
+    openSignup: bool('OPEN_SIGNUP', false),
+    developer: {
+      name: str('APP_DEVELOPER_NAME', 'Company Categorizer'),
+      url: opt('APP_DEVELOPER_URL'),
+      email: opt('APP_DEVELOPER_EMAIL'),
+    },
+    iconUrl: opt('APP_ICON_URL'),
+    homepageUrl: opt('APP_HOMEPAGE_URL'),
+  },
 };
 
 /**
@@ -270,12 +290,26 @@ export function validateConfig(): void {
  */
 export function validateApiConfig(): void {
   const problems: string[] = [];
-  if (config.api.apiKeys.length === 0) {
+  // API keys for /v1/companies/categorize now live in the database (one or
+  // more per organization). API_KEY in the environment is still accepted, but
+  // is optional. ADMIN_API_KEY is how the operator gets in to create the first
+  // organizations and keys.
+  const d = config.deeluge;
+  if (d.adminKeys.length === 0) {
     problems.push(
-      'API_KEY is required to run the HTTP API (any request can spend scrape + model credits). ' +
-        'Generate one with: openssl rand -hex 32'
+      'ADMIN_API_KEY is required: it is the operator key for the management API (organizations, ' +
+        'signing secrets, API keys). Generate one with: openssl rand -hex 32'
     );
   }
+  if (d.adminKeys.some((k) => k.length < 24)) problems.push('Every ADMIN_API_KEY must be at least 24 characters');
+  if (!d.encryptionKey || d.encryptionKey.length < 32) {
+    problems.push(
+      'SECRETS_ENCRYPTION_KEY (at least 32 characters) is required: organizations\' signing secrets and ' +
+        'workspace API keys are stored encrypted with it. Generate one with: openssl rand -hex 32. ' +
+        'Keep it safe: losing it means every organization has to re-enter its secret and reinstall.'
+    );
+  }
+  if (d.publicUrl && !/^https?:\/\//.test(d.publicUrl)) problems.push('PUBLIC_URL must start with https://');
   if (config.api.apiKeys.some((k) => k.length < 16)) {
     problems.push('Every API_KEY must be at least 16 characters');
   }

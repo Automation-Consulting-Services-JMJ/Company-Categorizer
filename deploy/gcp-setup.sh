@@ -163,3 +163,19 @@ gcloud scheduler jobs create http "$SCHEDULER_JOB" \
 #
 # Cloud Run sends SIGTERM and allows ~10s before killing the instance; the
 # server uses that window to let in-flight research reach the database.
+
+# ---- 10. The multi-tenant Deeluge app (README "Deeluge app") ----
+# Needs the service from step 9. --no-cpu-throttling matters: categorizing
+# finishes in the background after Deeluge has had its answer.
+#
+#   printf '%s' "$(openssl rand -hex 32)" | gcloud secrets create ADMIN_API_KEY --data-file=-
+#   printf '%s' "$(openssl rand -hex 32)" | gcloud secrets create SECRETS_ENCRYPTION_KEY --data-file=-
+#
+#   SERVICE_URL=$(gcloud run services describe company-categorizer-api --region="$REGION" --format='value(status.url)')
+#   gcloud run services update company-categorizer-api --region="$REGION" \
+#     --update-env-vars="PUBLIC_URL=${SERVICE_URL},APP_DEVELOPER_NAME=Automation Consulting Services" \
+#     --update-secrets="ADMIN_API_KEY=ADMIN_API_KEY:latest,SECRETS_ENCRYPTION_KEY=SECRETS_ENCRYPTION_KEY:latest"
+#
+# Then open ${SERVICE_URL}/setup, sign in with the admin key and add organizations.
+# Organizations' signing secrets and keys go in the database through that page,
+# never into Secret Manager or env vars.

@@ -454,6 +454,15 @@ export function isTransportHealthy(): boolean {
   return !config.ssh.enabled || tunnelHealthy;
 }
 
+/** A plain parameterised query on the shared pool (tunnel recovery included). */
+export async function dbQuery<R extends pg.QueryResultRow = pg.QueryResultRow>(
+  text: string,
+  params: unknown[] = []
+): Promise<pg.QueryResult<R>> {
+  const client = await getPool();
+  return client.query<R>(text, params);
+}
+
 /** Cheap startup check so a bad DATABASE_URL fails loudly and immediately. */
 export async function assertConnection(): Promise<void> {
   const client = await getPool();

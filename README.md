@@ -53,13 +53,13 @@ npm run dev:server           # from source
 npm run build && npm run serve
 ```
 
-Needs `API_KEY` (the server refuses to start without one - every request can
-spend scrape and model credits) plus the same database / provider settings as
+Needs `ADMIN_API_KEY` and `SECRETS_ENCRYPTION_KEY`; callers use API keys stored in the database
+(see "Deeluge app" below - `API_KEY` from the environment is still accepted) plus the same database / provider settings as
 the batch job. Run `migration.sql` once: it adds an index the lookup uses.
 
 ### `POST /v1/companies/categorize`
 
-Auth: `Authorization: Bearer <API_KEY>` or `X-API-Key: <API_KEY>`.
+Auth: `Authorization: Bearer <key>` or `X-API-Key: <key>`. Any organization or admin key from the database, or `API_KEY` from the environment.
 
 ```jsonc
 // one company                                  -> the result object directly
@@ -156,6 +156,130 @@ liveness probe.
   when it dropped fail with `internal_error`; their rows are recoverable (see claims above).
 - **Sheets mirroring** (`SHEET_WRITEBACK_ENABLED`) applies to API-researched rows
   too, if you have it on.
+
+## Deeluge app (multi-tenant)
+
+The categorizer is its own application. Any organization can add it to its
+Deeluge workspace, and an organization can share its app with other firms the
+way Deeluge's sharing works.
+
+### How tenancy maps onto Deeluge
+
+| Deeluge | Categorizer | Stored in |
+|---|---|---|
+| An organization registers the app (Settings → Developers → Apps) and gets **one signing secret** | a **registration**, with its own URLs `/deeluge/r/<registration id>/…`, the secret (encrypted), and manifest settings | `deeluge_registrations` |
+| A workspace installs it (the organization's own, or one it shared the app with) and gets **its own API key** | an **installation** per (registration, workspace), with that workspace's `sf_live_` key (encrypted), API address and column mapping | `deeluge_installations` |
+| *(this service's own API)* | **API keys** per organization (plus admin keys), checked against the database | `categorizer_api_keys` (SHA-256 only) |
+
+Every Deeluge request is checked against the signing secret of the registration
+named in its URL. That organization's secret is read from the database, never
+from `.env`. One organization's secret cannot open another organization's URLs.
+Deeluge signs everything for one app with that app's secret, including
+installs by the workspaces it was shared with. So those installs arrive at the
+sharing organization's URLs, pass its secret, and are each stored with their own
+workspace key. Requests to the bare `/deeluge` address still work: the
+categorizer tries each active organization's secret.
+
+Keys for `POST /v1/companies/categorize` and the management API are looked up in
+`categorizer_api_keys`. `ADMIN_API_KEY` (env) is the operator's way in.
+`API_KEY` (env) is optional and only kept so existing callers keep working.
+
+### Adding an organization
+
+1. **Operator:** open `<service>/setup` and sign in with `ADMIN_API_KEY`. Under
+   *Add an organization*, enter its name. This creates the registration and its
+   first API key, shown once; give that key to the organization. With
+   `OPEN_SIGNUP=true`, organizations can create their own registration without
+   an admin.
+2. **Organization**, on `/setup` with its key:
+   1. Copies its manifest and registers it in Deeluge. For an app it already
+      registered, it pastes the manifest over the old one and keeps the `key`.
+   2. Pastes the app's signing secret from the key icon on its row in Deeluge.
+   3. Installs the app in its workspace, or uninstalls and installs again. The
+      workspace key reaches the categorizer by itself.
+   4. Optionally shares the app in Deeluge (padlock icon) and sends the install
+      link to other firms. Their workspaces then appear under *Workspaces using it*,
+      with their own categorization counts.
+
+### Switching the existing Company Categorizer over from n8n
+
+With default settings the manifest matches the one you have now:
+
+- the same key `company-categorizer`
+- the same columns `account_category` and `opportunity_category`
+- the same `categorize` action and `categorizer` widget
+- objects `accounts` and `opportunities`
+- automatic categorizing on `accounts`
+
+So the columns and their values stay. The differences are the URLs, an
+additional optional "Research category again" action, and `record.updated`
+(re-categorize when a domain changes). Both can be switched off in Settings.
+Create a registration for Automation Consulting Services, save the app's signing
+secret on it, paste the manifest into Deeluge, reinstall, and turn the workflow off.
+**Roll the signing secret while you do it** (circular arrow in Deeluge): the
+exported workflow had the old one written into its code.
+
+### What it does in Deeluge
+
+| In Deeluge | What happens |
+|---|---|
+| **Install / update / uninstall** | That workspace's key, API address and column mapping are saved, kept current, or deleted. An install without `api_base_url` is answered with a 500 so Deeluge cancels it. |
+| **"Categorize company"** | Reads the record's domain (`domains`, `domain`, `website`). For an opportunity without one, it reads the domain of its linked **account**. It then runs lookup → name screen → scrape → classify and writes the Category column with the calling workspace's own key. Stored results usually answer within the action's 8 seconds, with the result in the message. Slower runs answer "Categorizing…" and finish in the background. |
+| **"Research category again"** | The same with a forced refresh; asks for confirmation first. |
+| Run on many rows / a list | Each record is queued and answered at once. `DEELUGE_CONCURRENCY` limits the work across all organizations. |
+| A record is **created** (objects in *auto_objects*) | Categorized in the background unless its Category column already has a value. Retried deliveries are ignored. |
+| A record's **domain changes** | Categorized again. |
+| **Company category** panel | Category, sub-category, domain, whether the result came from the name and domain or the website, check date and note, within the 3-second limit. Buttons to categorize, save, or research again. |
+
+There's no placeholder domain anymore. The n8n workflow fell back to
+`automationconsultingservices.org`, so every record without a domain got that
+company's category. Now such a record is left alone and the person is told why.
+
+### Organization settings
+
+Each organization has its own settings: in *Settings* on `/setup`, or with
+`PATCH /v1/registrations/:id {"settings": {...}}`. After a change, paste the new
+manifest into Deeluge.
+
+| Setting | Default | |
+|---|---|---|
+| `app_key` | `company-categorizer` | Must equal the `key` of the app registered in Deeluge |
+| `app_name`, `description` | as today | |
+| `objects` | `["accounts","opportunities"]` | Category column, actions and panel |
+| `auto_objects` | `["accounts"]` | Categorized automatically when created / re-domained |
+| `categorize_on_create`, `categorize_on_domain_change` | `true` | |
+| `sub_category_column` | `false` | Adds `<object>_sub_category` columns |
+| `recategorize_action` | `true` | |
+| `developer` | `APP_DEVELOPER_*` env | |
+
+### Management API
+
+Use `Authorization: Bearer <key>`. An admin key can do everything. An
+organization key can only reach its own registration.
+
+| | |
+|---|---|
+| `GET /v1/me` | Who the key is |
+| `POST /v1/registrations` | `{name, signing_secret?, settings?}`. Admin only, unless `OPEN_SIGNUP`. Returns the organization's first key, once |
+| `GET /v1/registrations[/:id]` | With installations, status and manifest URL |
+| `PATCH /v1/registrations/:id` | `name`, `settings`. `disabled` is admin only; a disabled organization's requests get 403 |
+| `DELETE /v1/registrations/:id` | Admin only |
+| `PUT /v1/registrations/:id/signing-secret` | `{signing_secret}`. The previous secret keeps working for an hour |
+| `GET /v1/registrations/:id/manifest`, `GET /deeluge/r/:id/manifest.json` | The manifest. The second needs no key |
+| `PUT /v1/registrations/:id/installations/:workspace_id` | `{api_key, api_base_url}` for a workspace whose key was shown on screen instead of being delivered |
+| `DELETE /v1/registrations/:id/installations/:workspace_id` | |
+| `GET`/`POST /v1/registrations/:id/api-keys` | List keys, or create one (returned once) |
+| `GET`/`POST /v1/api-keys` | Admin keys (admin only) |
+| `DELETE /v1/api-keys/:id` | Revoke. Takes effect everywhere within 30 seconds |
+
+### Running it
+
+- Set `ADMIN_API_KEY` and `SECRETS_ENCRYPTION_KEY` (both required), and
+  `PUBLIC_URL`. The tables are created on startup, or with the end of `migration.sql`.
+- On Cloud Run, keep `--no-cpu-throttling` on the service. Otherwise background
+  categorizing stalls once Deeluge has its answer. See step 10 of `deploy/gcp-setup.sh`.
+- Usage per workspace (`categorized_count`, `last_categorized_at`) is recorded
+  on each installation, for billing or limits.
 
 ## What changed in this version
 
@@ -320,6 +444,16 @@ Trade-offs to know about:
 | `src/index.ts` | batch entrypoint, cron, graceful shutdown |
 | `src/server.ts` | HTTP API entrypoint: auth, request parsing, routing |
 | `src/research.ts` | API logic: cache check -> claim -> `processCompany()` -> read back |
+| `src/deeluge/app.ts` | Deeluge app: dispatch, record actions, webhooks, the panel, background queue |
+| `src/deeluge/signature.ts` | Standard Webhooks signature check |
+| `src/deeluge/client.ts` | Deeluge `/api/v1` calls; domain / linked-account / column helpers |
+| `src/deeluge/manifest.ts` | one organization's manifest |
+| `src/tenancy/registrations.ts` | organizations: signing secrets (encrypted), settings |
+| `src/tenancy/installations.ts` | per-(organization, workspace) Deeluge keys, columns, usage |
+| `src/tenancy/apiKeys.ts` | the categorizer's own API keys, from the database |
+| `src/tenancy/management.ts` | the management API |
+| `src/tenancy/setupPage.ts` | `GET /setup` |
+| `src/tenancy/schema.ts`, `crypto.ts` | tables; AES-256-GCM sealing, key hashing |
 | `src/domain.ts` | domain normalisation + the spellings to look up |
 | `src/pipeline.ts` | claim → name screen → scrape → classify → write back, worker pool |
 | `src/llm.ts` | provider switch (`LLM_PROVIDER`) — the only file pipeline.ts/index.ts import from for LLM calls |

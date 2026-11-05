@@ -59,3 +59,52 @@ FROM public.company_metadata;
 -- UPDATE public.company_metadata
 --    SET metadata = metadata || '{"checked": null, "errors": null}'::jsonb
 --  WHERE metadata->>'domain' IN ('example.com');
+
+-- ============================================================================
+-- Multi-tenant Deeluge app (README "Deeluge app"). The server also creates
+-- these on startup if its database user may.
+--   deeluge_registrations  one per organization that registered the app in Deeluge
+--   deeluge_installations  one per (registration, workspace) that installed it
+--   categorizer_api_keys   keys for this service's API, stored as SHA-256 hashes
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS public.deeluge_registrations (
+  id               TEXT PRIMARY KEY,
+  name             TEXT NOT NULL,
+  -- [{ "secret": "enc:v1:...", "added_at": "...", "expires_at": null | "..." }]
+  signing_secrets  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  -- The Deeluge app id, learned from the first verified request that carries it.
+  deeluge_app_id   TEXT,
+  settings         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  disabled         BOOLEAN NOT NULL DEFAULT false,
+  last_request_at  TIMESTAMPTZ,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.deeluge_installations (
+  registration_id      TEXT NOT NULL REFERENCES public.deeluge_registrations(id) ON DELETE CASCADE,
+  workspace_id         TEXT NOT NULL,
+  workspace_name       TEXT,
+  installation_id      TEXT,
+  api_key              TEXT NOT NULL,   -- enc:v1:..., the workspace's sf_live_ key
+  api_base_url         TEXT NOT NULL,
+  fields               JSONB NOT NULL DEFAULT '{}'::jsonb,
+  categorized_count    INTEGER NOT NULL DEFAULT 0,
+  last_categorized_at  TIMESTAMPTZ,
+  installed_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (registration_id, workspace_id)
+);
+
+CREATE TABLE IF NOT EXISTS public.categorizer_api_keys (
+  id               TEXT PRIMARY KEY,
+  name             TEXT NOT NULL,
+  role             TEXT NOT NULL CHECK (role IN ('admin', 'organization')),
+  registration_id  TEXT REFERENCES public.deeluge_registrations(id) ON DELETE CASCADE,
+  key_hash         TEXT NOT NULL UNIQUE,
+  key_prefix       TEXT NOT NULL,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at     TIMESTAMPTZ,
+  revoked_at       TIMESTAMPTZ,
+  CHECK (role = 'admin' OR registration_id IS NOT NULL)
+);
