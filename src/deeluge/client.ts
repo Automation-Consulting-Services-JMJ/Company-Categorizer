@@ -10,7 +10,6 @@ export interface DeelugeRecord {
   id: string;
   object: string;
   title?: string | null;
-  name?: string | null; // Added just to test out cloud run implementation.
   values: Record<string, unknown>;
 }
 
