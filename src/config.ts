@@ -154,6 +154,13 @@ export const config: AppConfig = {
     minConfidence: num('NAME_SCREEN_MIN_CONFIDENCE', 0.9),
     maxTokens: num('NAME_SCREEN_MAX_TOKENS', 250),
   },
+  financialCriteria: {
+    // Second model call over the same scraped text: revenue / EBITDA /
+    // enterprise-value criteria (min, max, is_flexible).
+    enabled: bool('FINANCIAL_CRITERIA_ENABLED', true),
+    maxTokens: num('FINANCIAL_CRITERIA_MAX_TOKENS', 400),
+    skipTargets: bool('FINANCIAL_CRITERIA_SKIP_TARGETS', true),
+  },
   database: {
     connectionString: required('DATABASE_URL'),
     // Set DATABASE_SSL=true for hosted Postgres (Neon, Supabase, etc.).
@@ -198,7 +205,7 @@ export const config: AppConfig = {
       .filter(Boolean),
     maxBatch: Math.max(1, Math.floor(num('API_MAX_BATCH', 25))),
     concurrency: Math.max(1, Math.floor(num('API_CONCURRENCY', num('PIPELINE_CONCURRENCY', 4)))),
-    resultMaxAgeMonths: Math.max(1, Math.floor(num('RESULT_MAX_AGE_MONTHS', 6))),
+    resultMaxAgeMonths: Math.max(1, Math.floor(num('RESULT_MAX_AGE_MONTHS', 4))),
     waitForInflightMs: Math.max(0, num('API_WAIT_FOR_INFLIGHT_MS', 120_000)),
     maxBodyBytes: 1_048_576,
   },

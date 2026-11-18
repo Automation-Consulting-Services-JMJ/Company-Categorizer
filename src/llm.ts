@@ -5,10 +5,22 @@
  * directly, so switching providers is a config change, not a code change.
  */
 import { config } from './config.js';
-import { categorizeCompany as categorizeCompanyClaude, prewarmPromptCache, closeAnthropic } from './claudeAgent.js';
+import {
+  categorizeCompany as categorizeCompanyClaude,
+  extractFinancialCriteria as extractFinancialCriteriaClaude,
+  prewarmPromptCache,
+  prewarmFinancialCriteriaCache,
+  closeAnthropic,
+} from './claudeAgent.js';
 import { screenCompanyName as screenCompanyNameClaude, prewarmNameScreenCache } from './nameScreen.js';
-import { categorizeCompanyOpenAi, screenCompanyNameOpenAi, prewarmOpenAi, closeOpenAi } from './openaiAgent.js';
-import type { CategorizationOutcome, NameScreenOutcome } from './types.js';
+import {
+  categorizeCompanyOpenAi,
+  extractFinancialCriteriaOpenAi,
+  screenCompanyNameOpenAi,
+  prewarmOpenAi,
+  closeOpenAi,
+} from './openaiAgent.js';
+import type { CategorizationOutcome, FinancialCriteriaOutcome, NameScreenOutcome } from './types.js';
 
 export { combineCategories } from './categorization.js';
 
@@ -19,6 +31,15 @@ export async function categorizeCompany(
   return config.llm.provider === 'openai'
     ? categorizeCompanyOpenAi(companyMarkdown, domain)
     : categorizeCompanyClaude(companyMarkdown, domain);
+}
+
+export async function extractFinancialCriteria(
+  companyMarkdown: string,
+  domain: string
+): Promise<FinancialCriteriaOutcome> {
+  return config.llm.provider === 'openai'
+    ? extractFinancialCriteriaOpenAi(companyMarkdown, domain)
+    : extractFinancialCriteriaClaude(companyMarkdown, domain);
 }
 
 export async function screenCompanyName(name: string, domain: string): Promise<NameScreenOutcome> {
@@ -39,6 +60,7 @@ export async function prewarmCaches(): Promise<void> {
   }
   await prewarmPromptCache();
   await prewarmNameScreenCache();
+  await prewarmFinancialCriteriaCache();
 }
 
 export function closeLlm(): void {

@@ -3,7 +3,7 @@ import { createTunnel } from 'tunnel-ssh';
 import type { Server } from 'net';
 import { config } from './config.js';
 import { domainLookupVariants, normalizeDomain } from './domain.js';
-import type { CompanyMetadata, PendingCompany, TokenUsage } from './types.js';
+import type { CompanyMetadata, FinancialCriteria, PendingCompany, TokenUsage } from './types.js';
 
 const { Pool } = pg;
 
@@ -306,7 +306,12 @@ export async function claimPendingCompanies(limit: number): Promise<PendingCompa
 export async function finishCompany(
   id: string,
   patch: Partial<CompanyMetadata>,
-  usage?: TokenUsage
+  usage?: TokenUsage,
+  /**
+   * Dedicated columns written in the same UPDATE. Leave a key out (or the
+   * whole object) to keep the column's current value; pass null to clear it.
+   */
+  columns?: { financialCriteria?: FinancialCriteria | null }
 ): Promise<void> {
   const client = await getPool();
 
@@ -327,9 +332,12 @@ export async function finishCompany(
                   'last_run_usage', $7::jsonb
                 )
            ) - 'processing_started_at',
+           financial_criteria = CASE WHEN $8::boolean THEN $9::jsonb ELSE t.financial_criteria END,
            updated_at = now()
      WHERE t.id = $1;
   `;
+
+  const writeCriteria = columns !== undefined && columns.financialCriteria !== undefined;
 
   await client.query(query, [
     id,
@@ -339,6 +347,8 @@ export async function finishCompany(
     usage?.cache_read_input_tokens ?? 0,
     usage?.cache_creation_input_tokens ?? 0,
     usage ? JSON.stringify(usage) : null,
+    writeCriteria,
+    writeCriteria && columns?.financialCriteria ? JSON.stringify(columns.financialCriteria) : null,
   ]);
 }
 
@@ -378,8 +388,8 @@ export async function saveScrapeData(
 
 /**
  * Fails at startup - with the fix spelled out - if the migration adding the
- * `sitemap` and `scraped_text` columns hasn't been run, instead of failing
- * on every row later.
+ * `sitemap`, `scraped_text` and `financial_criteria` columns hasn't been run,
+ * instead of failing on every row later.
  */
 export async function assertScrapeColumns(): Promise<void> {
   const client = await getPool();
@@ -391,16 +401,21 @@ export async function assertScrapeColumns(): Promise<void> {
     `SELECT column_name, data_type
        FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = $2
-        AND column_name IN ('sitemap', 'scraped_text')`,
+        AND column_name IN ('sitemap', 'scraped_text', 'financial_criteria')`,
     [schema, table]
   );
   const have = new Map(rows.map((r) => [r.column_name, r.data_type]));
-  const missing = ['sitemap', 'scraped_text'].filter((c) => !have.has(c));
+  const missing = ['sitemap', 'scraped_text', 'financial_criteria'].filter((c) => !have.has(c));
   if (missing.length > 0) {
     throw new Error(
       `${TABLE} is missing column(s): ${missing.join(', ')}. ` +
         `Run migration.sql (or: ALTER TABLE ${TABLE} ADD COLUMN IF NOT EXISTS sitemap TEXT, ` +
-        `ADD COLUMN IF NOT EXISTS scraped_text TEXT;)`
+        `ADD COLUMN IF NOT EXISTS scraped_text TEXT, ADD COLUMN IF NOT EXISTS financial_criteria JSONB;)`
+    );
+  }
+  if (have.get('financial_criteria') !== 'jsonb') {
+    throw new Error(
+      `${TABLE}.financial_criteria must be JSONB but is ${have.get('financial_criteria')}.`
     );
   }
   if (have.get('sitemap') !== 'text') {
@@ -519,18 +534,21 @@ export interface CompanyRecord {
   /** Checked, and checked within the configured freshness window. */
   isFresh: boolean;
   checkedAt: Date | null;
+  /** The financial_criteria column as stored (pg parses JSONB); null when empty. */
+  financialCriteria: unknown;
 }
 
 interface RecordRow {
   id: string;
   metadata: CompanyMetadata | null;
+  financial_criteria: unknown;
   is_checked: boolean;
   is_fresh: boolean;
   checked_at: Date | null;
 }
 
 const RECORD_COLUMNS = `
-  id, metadata,
+  id, metadata, financial_criteria,
   ${IS_CHECKED} AS is_checked,
   ${CHECKED_AT} AS checked_at,
   (${IS_CHECKED} AND ${CHECKED_AT} >= now() - make_interval(months => $2::int)) AS is_fresh`;
@@ -549,6 +567,7 @@ function toRecord(row: RecordRow, domain: string): CompanyRecord {
     isChecked: row.is_checked,
     isFresh: row.is_fresh,
     checkedAt: row.checked_at,
+    financialCriteria: row.financial_criteria ?? null,
   };
 }
 

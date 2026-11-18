@@ -2,12 +2,19 @@ import OpenAI from 'openai';
 import { config } from './config.js';
 import { RateLimiter } from './rateLimit.js';
 import { withRetry } from './retry.js';
-import { CATEGORIZER_SYSTEM_PROMPT, NAME_SCREEN_SYSTEM_PROMPT } from './prompts.js';
+import {
+  CATEGORIZER_SYSTEM_PROMPT,
+  FINANCIAL_CRITERIA_SYSTEM_PROMPT,
+  NAME_SCREEN_SYSTEM_PROMPT,
+} from './prompts.js';
 import { extractCategorizationJson, isCategorizationResult } from './categorization.js';
 import { cleanNameScreenInput, parseNameScreenResult } from './nameScreenParsing.js';
+import { parseFinancialCriteria } from './financialCriteria.js';
 import type {
   CategorizationOutcome,
   CategorizationResult,
+  FinancialCriteria,
+  FinancialCriteriaOutcome,
   NameScreenOutcome,
   NameScreenResult,
   TokenUsage,
@@ -126,11 +133,14 @@ async function warmPrompt(systemPrompt: string, label: string): Promise<void> {
   }
 }
 
-/** Warms both cacheable prompts (categorizer, and name screen if enabled). */
+/** Warms every cacheable prompt in use (categorizer, plus name screen / financial criteria if enabled). */
 export async function prewarmOpenAi(): Promise<void> {
   await warmPrompt(CATEGORIZER_SYSTEM_PROMPT, 'categorizer');
   if (config.nameScreen.enabled) {
     await warmPrompt(NAME_SCREEN_SYSTEM_PROMPT, 'nameScreen');
+  }
+  if (config.financialCriteria.enabled) {
+    await warmPrompt(FINANCIAL_CRITERIA_SYSTEM_PROMPT, 'financialCriteria');
   }
 }
 
@@ -251,6 +261,60 @@ export async function screenCompanyNameOpenAi(
     isConfidentTarget:
       result.verdict === 'target' && result.confidence >= config.nameScreen.minConfidence,
   };
+}
+
+/**
+ * Calls OpenAI to pull revenue / EBITDA / enterprise-value criteria out of the
+ * scraped markdown. Mirrors extractFinancialCriteria() in claudeAgent.ts.
+ */
+export async function extractFinancialCriteriaOpenAi(
+  companyMarkdown: string,
+  domain: string
+): Promise<FinancialCriteriaOutcome> {
+  const response = await openaiLimiter.schedule(() =>
+    withRetry(
+      () =>
+        getOpenAiClient().chat.completions.create({
+          model: config.openai.model,
+          max_completion_tokens: config.financialCriteria.maxTokens,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: FINANCIAL_CRITERIA_SYSTEM_PROMPT },
+            { role: 'user', content: `COMPANY DATA:\n${companyMarkdown}` },
+          ],
+        }),
+      { name: 'openai.financialCriteria', retries: config.pipeline.maxRetries, limiter: openaiLimiter }
+    )
+  );
+
+  const usage = readOpenAiUsage(response.usage, config.openai.model);
+  console.log(
+    `[openai] ${domain} (financial criteria): in=${usage.input_tokens} out=${usage.output_tokens} ` +
+      `cache_read=${usage.cache_read_input_tokens}`
+  );
+
+  const text = response.choices[0]?.message?.content;
+  if (!text) {
+    const err = new Error('OpenAI financial-criteria response contained no message content') as Error & {
+      usage: TokenUsage;
+    };
+    err.usage = usage;
+    throw err;
+  }
+
+  let parsed: FinancialCriteria;
+  try {
+    parsed = parseFinancialCriteria(text);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const wrapped = new Error(
+      `Failed to parse financial-criteria JSON: ${reason}\nRaw: ${text.slice(0, 500)}`
+    ) as Error & { usage: TokenUsage };
+    wrapped.usage = usage;
+    throw wrapped;
+  }
+
+  return { result: parsed, usage };
 }
 
 export function closeOpenAi(): void {

@@ -2,11 +2,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import { config } from './config.js';
 import { RateLimiter } from './rateLimit.js';
 import { withRetry } from './retry.js';
-import { CATEGORIZER_SYSTEM_PROMPT } from './prompts.js';
+import { CATEGORIZER_SYSTEM_PROMPT, FINANCIAL_CRITERIA_SYSTEM_PROMPT } from './prompts.js';
 import { extractCategorizationJson, isCategorizationResult } from './categorization.js';
+import { parseFinancialCriteria } from './financialCriteria.js';
 import type {
   CategorizationOutcome,
   CategorizationResult,
+  FinancialCriteria,
+  FinancialCriteriaOutcome,
   TokenUsage,
 } from './types.js';
 
@@ -68,6 +71,7 @@ export function buildCachedSystem(text: string): Anthropic.MessageCreateParams['
 }
 
 const SYSTEM = buildCachedSystem(CATEGORIZER_SYSTEM_PROMPT);
+const FINANCIAL_SYSTEM = buildCachedSystem(FINANCIAL_CRITERIA_SYSTEM_PROMPT);
 
 export function readUsage(usage: unknown, model: string): TokenUsage {
   const u = (usage ?? {}) as Record<string, unknown>;
@@ -164,6 +168,13 @@ export async function prewarmPromptCache(): Promise<void> {
   await warmSystemPrompt(SYSTEM, 'categorizer');
 }
 
+/** Warms the financial-criteria extractor's cached system prompt. */
+export async function prewarmFinancialCriteriaCache(): Promise<void> {
+  if (!config.financialCriteria.enabled) return;
+  if (!config.anthropic.cacheEnabled || !config.anthropic.prewarmCache) return;
+  await warmSystemPrompt(FINANCIAL_SYSTEM, 'financialCriteria');
+}
+
 /**
  * Warms any other cached system prompt built with buildCachedSystem (e.g.
  * the name screen's). Exported so modules other than this one can reuse the
@@ -231,6 +242,60 @@ export async function categorizeCompany(
     };
     err.usage = usage;
     throw err;
+  }
+
+  return { result: parsed, usage };
+}
+
+/**
+ * Calls Claude to pull revenue / EBITDA / enterprise-value criteria out of the
+ * same scraped markdown the categorizer read. Throws on API failure or an
+ * unparseable reply, with `.usage` attached when tokens were spent.
+ */
+export async function extractFinancialCriteria(
+  companyMarkdown: string,
+  domain: string
+): Promise<FinancialCriteriaOutcome> {
+  const message = await anthropicLimiter.schedule(() =>
+    withRetry(
+      () =>
+        getAnthropicClient().messages.create({
+          model: config.anthropic.model,
+          max_tokens: config.financialCriteria.maxTokens,
+          system: FINANCIAL_SYSTEM,
+          messages: [{ role: 'user', content: `COMPANY DATA:\n${companyMarkdown}` }],
+        }),
+      { name: 'claude.financialCriteria', retries: config.pipeline.maxRetries, limiter: anthropicLimiter }
+    )
+  );
+
+  const usage = readUsage(message.usage, config.anthropic.model);
+  console.log(
+    `[claude] ${domain} (financial criteria): in=${usage.input_tokens} out=${usage.output_tokens} ` +
+      `cache_read=${usage.cache_read_input_tokens} cache_write=${usage.cache_creation_input_tokens}`
+  );
+
+  const textBlock = message.content.find(
+    (block): block is Anthropic.TextBlock => block.type === 'text'
+  );
+  if (!textBlock) {
+    const err = new Error('Claude financial-criteria response contained no text block') as Error & {
+      usage: TokenUsage;
+    };
+    err.usage = usage;
+    throw err;
+  }
+
+  let parsed: FinancialCriteria;
+  try {
+    parsed = parseFinancialCriteria(textBlock.text);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    const wrapped = new Error(
+      `Failed to parse financial-criteria JSON: ${reason}\nRaw: ${textBlock.text.slice(0, 500)}`
+    ) as Error & { usage: TokenUsage };
+    wrapped.usage = usage;
+    throw wrapped;
   }
 
   return { result: parsed, usage };

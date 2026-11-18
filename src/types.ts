@@ -122,6 +122,18 @@ export interface NameScreenConfig {
   maxTokens: number;
 }
 
+export interface FinancialCriteriaConfig {
+  /** Run the revenue / EBITDA / enterprise-value extraction after categorization. */
+  enabled: boolean;
+  maxTokens: number;
+  /**
+   * Skip the extraction when the company was categorized as Target only (or got
+   * no category at all). Operating companies don't publish acquisition criteria,
+   * so this saves a second full-text model call on most rows.
+   */
+  skipTargets: boolean;
+}
+
 export interface PipelineConfig {
   batchSize: number;
   /** How many companies are processed at the same time. */
@@ -163,6 +175,7 @@ export interface AppConfig {
   anthropic: AnthropicConfig;
   openai: OpenAiConfig;
   nameScreen: NameScreenConfig;
+  financialCriteria: FinancialCriteriaConfig;
   database: DatabaseConfig;
   ssh: SshConfig;
   pipeline: PipelineConfig;
@@ -222,6 +235,13 @@ export interface CompanyMetadata {
   classification_source?: 'name_screen' | 'scrape' | null;
   /** Audit trail of the name/domain pre-screen, kept even when it fell through. */
   name_screen?: NameScreenRecord | null;
+  /**
+   * Why the financial_criteria COLUMN is (or isn't) filled in. The criteria
+   * themselves live in that dedicated JSONB column, not in metadata.
+   */
+  financial_criteria_status?: FinancialCriteriaStatus | null;
+  /** Set only when the extraction call failed; the categorization is still stored. */
+  financial_criteria_error?: string | null;
   [key: string]: unknown;
 }
 
@@ -366,6 +386,43 @@ export interface CategorizationOutcome {
   result: CategorizationResult;
   usage: TokenUsage;
 }
+
+/* ------------------------------------------------------------------ */
+/* Financial criteria                                                  */
+/* ------------------------------------------------------------------ */
+
+/** One criterion. Amounts are plain numbers in the currency the site used (never converted). */
+export interface FinancialRange {
+  min: number | null;
+  max: number | null;
+  is_flexible: boolean;
+}
+
+/** Exactly the three keys the extraction prompt returns. */
+export interface FinancialCriteria {
+  revenue: FinancialRange;
+  ebitda: FinancialRange;
+  enterprise_value: FinancialRange;
+}
+
+export interface FinancialCriteriaOutcome {
+  result: FinancialCriteria;
+  usage: TokenUsage;
+}
+
+/**
+ * extracted     - the model ran; the ranges may still all be null (nothing stated).
+ * skipped_target - categorized as Target only, so there are no buyer criteria to find.
+ * not_scraped   - settled by the name screen; there was no website text to read.
+ * disabled      - FINANCIAL_CRITERIA_ENABLED=false.
+ * failed        - the call or its parsing failed; see financial_criteria_error.
+ */
+export type FinancialCriteriaStatus =
+  | 'extracted'
+  | 'skipped_target'
+  | 'not_scraped'
+  | 'disabled'
+  | 'failed';
 
 /** Flattened Category / Sub Category / Note values. */
 export interface CombinedCategorization {

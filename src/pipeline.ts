@@ -9,10 +9,19 @@ import {
 } from './db.js';
 import { scrapeCompany, scraperStats } from './scraper.js';
 import { stripImages } from './cleanMarkdown.js';
-import { categorizeCompany, combineCategories, screenCompanyName, prewarmCaches } from './llm.js';
+import {
+  categorizeCompany,
+  combineCategories,
+  extractFinancialCriteria,
+  screenCompanyName,
+  prewarmCaches,
+} from './llm.js';
+import { formatRange, isTargetOnly } from './financialCriteria.js';
 import { EMPTY_USAGE } from './types.js';
 import type {
+  CategorizationResult,
   CompanyMetadata,
+  FinancialCriteria,
   NameScreenOutcome,
   NameScreenRecord,
   PendingCompany,
@@ -158,13 +167,83 @@ async function storeNameScreenTarget(
     scrape_provider: null,
     classification_source: 'name_screen',
     name_screen: toRecord(outcome, true),
+    // No website text was read, so there is nothing to extract criteria from.
+    financial_criteria_status: 'not_scraped',
+    financial_criteria_error: null,
   };
 
-  await finishCompany(company.id, patch, outcome.usage);
+  // Clears the financial_criteria column too, so an earlier run's values don't linger.
+  await finishCompany(company.id, patch, outcome.usage, { financialCriteria: null });
   await mirrorToSheet(domain, 'Target', '', note);
 
   console.log(`[pipeline] Done: ${domain} -> Target [name screen, scrape skipped]`);
   return { usage: outcome.usage, via: 'name_screen' };
+}
+
+/* ------------------------------------------------------------------ */
+/* Financial criteria (revenue / EBITDA / enterprise value)            */
+/* ------------------------------------------------------------------ */
+
+type FinancialPatch = Pick<CompanyMetadata, 'financial_criteria_status' | 'financial_criteria_error'>;
+
+interface FinancialStep {
+  /** Goes to the financial_criteria column; null clears it. */
+  criteria: FinancialCriteria | null;
+  /** Status and error, merged into metadata. */
+  patch: FinancialPatch;
+  /** Tokens spent, including on a failed/unparseable reply. */
+  usage?: TokenUsage;
+}
+
+/**
+ * Never throws. The categorization is the row's main result, so a failed
+ * extraction is recorded in financial_criteria_error and the row is still
+ * marked checked. Every key is always written, so a re-run clears values
+ * left over from an earlier run.
+ */
+async function runFinancialCriteria(
+  markdown: string,
+  domain: string,
+  categorization: CategorizationResult
+): Promise<FinancialStep> {
+  const fc = config.financialCriteria;
+  const none = (status: FinancialPatch['financial_criteria_status']): FinancialStep => ({
+    criteria: null,
+    patch: { financial_criteria_status: status, financial_criteria_error: null },
+  });
+
+  if (!fc.enabled) return none('disabled');
+  if (fc.skipTargets && isTargetOnly(categorization.categories.map((c) => c.category))) {
+    return none('skipped_target');
+  }
+
+  try {
+    const outcome = await extractFinancialCriteria(markdown, domain);
+    const r = outcome.result;
+    const summary = (['revenue', 'ebitda', 'enterprise_value'] as const)
+      .map((k) => `${k}=${formatRange(r[k]) ?? '-'}`)
+      .join(' ');
+    console.log(`[financial] ${domain}: ${summary}`);
+    return {
+      criteria: r,
+      patch: {
+        financial_criteria_status: 'extracted',
+        financial_criteria_error: null,
+      },
+      usage: outcome.usage,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[financial] ${domain}: extraction failed (${message.split('\n')[0]})`);
+    return {
+      criteria: null,
+      patch: {
+        financial_criteria_status: 'failed',
+        financial_criteria_error: message.slice(0, 2000),
+      },
+      usage: usageFromError(err),
+    };
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -230,7 +309,12 @@ export async function processCompany(company: PendingCompany): Promise<ProcessRe
   }
 
   const combined = combineCategories(outcome.result);
-  const totalUsage = sumUsage(screenUsage, outcome.usage) ?? outcome.usage;
+
+  // --- financial criteria (second call over the same text; never fails the row) ---
+  const financial = await runFinancialCriteria(cleanedMarkdown, domain, outcome.result);
+
+  const totalUsage =
+    sumUsage(sumUsage(screenUsage, outcome.usage), financial.usage) ?? outcome.usage;
 
   // --- write result + token usage back into the JSONB ---
   const patch: Partial<CompanyMetadata> = {
@@ -245,9 +329,10 @@ export async function processCompany(company: PendingCompany): Promise<ProcessRe
     scrape_provider: scraped.provider,
     classification_source: 'scrape',
     ...(screen.outcome ? { name_screen: toRecord(screen.outcome, false) } : {}),
+    ...financial.patch,
   };
 
-  await finishCompany(company.id, patch, totalUsage);
+  await finishCompany(company.id, patch, totalUsage, { financialCriteria: financial.criteria });
   await mirrorToSheet(
     domain,
     combined.combinedCategory,

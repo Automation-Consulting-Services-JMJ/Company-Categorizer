@@ -7,6 +7,10 @@ CREATE TABLE IF NOT EXISTS public.company_metadata (
   -- markdown text that was sent to the model.
   sitemap TEXT,
   scraped_text TEXT,
+  -- Filled by the financial-criteria step: the buyer's stated target ranges,
+  -- {"revenue"|"ebitda"|"enterprise_value": {"min", "max", "is_flexible"}}.
+  -- NULL when not extracted; metadata->>'financial_criteria_status' says why.
+  financial_criteria JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

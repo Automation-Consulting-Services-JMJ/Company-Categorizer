@@ -8,6 +8,12 @@ ALTER TABLE public.company_metadata
   ADD COLUMN IF NOT EXISTS sitemap TEXT,
   ADD COLUMN IF NOT EXISTS scraped_text TEXT;
 
+-- 0a. Financial-criteria column. REQUIRED as well (already present if you
+--     created it yourself; IF NOT EXISTS makes this a no-op then).
+--     financial_criteria - {"revenue"|"ebitda"|"enterprise_value": {"min", "max", "is_flexible"}}
+ALTER TABLE public.company_metadata
+  ADD COLUMN IF NOT EXISTS financial_criteria JSONB;
+
 -- 0b. ONLY if you already ran an earlier version of this migration that created
 --     `sitemap` as JSONB: convert it to TEXT, keeping existing data (one URL per
 --     line). Uncomment and run all four statements together.

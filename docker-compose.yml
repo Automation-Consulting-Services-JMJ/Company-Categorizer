@@ -58,6 +58,10 @@ services:
       NAME_SCREEN_ENABLED: "${NAME_SCREEN_ENABLED:-true}"
       NAME_SCREEN_MIN_CONFIDENCE: "${NAME_SCREEN_MIN_CONFIDENCE:-0.9}"
 
+      # ---- Financial criteria (revenue / EBITDA / EV) ------------------------
+      FINANCIAL_CRITERIA_ENABLED: "${FINANCIAL_CRITERIA_ENABLED:-true}"
+      FINANCIAL_CRITERIA_SKIP_TARGETS: "${FINANCIAL_CRITERIA_SKIP_TARGETS:-true}"
+
       # ---- Throughput -------------------------------------------------------
       # Keep these low while testing so you don't burn credits.
       BATCH_SIZE: "${BATCH_SIZE:-5}"

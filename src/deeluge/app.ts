@@ -25,6 +25,8 @@
 import { findCompaniesByDomains, type CompanyRecord } from '../db.js';
 import { config } from '../config.js';
 import { researchCompanies, type ResearchResult } from '../research.js';
+import { formatRange, toAmount } from '../financialCriteria.js';
+import type { FinancialCriteria } from '../types.js';
 import {
   deleteInstallation,
   getInstallation,
@@ -420,6 +422,21 @@ async function widget(reg: Registration, msg: Msg): Promise<DeelugeResponse> {
     const src = meta.classification_source === 'name_screen' ? 'Name and domain' : meta.classification_source === 'scrape' ? 'Website' : null;
     if (src) items.push({ label: 'Decided from', value: src });
     if (stored?.checkedAt) items.push({ label: 'Checked', value: stored.checkedAt.toISOString().slice(0, 10) });
+    // Buyer criteria from the website, when any were stated (amounts in the site's own currency).
+    const fc = stored?.financialCriteria;
+    if (fc && typeof fc === 'object') {
+      const labels: Array<[keyof FinancialCriteria, string]> = [
+        ['revenue', 'Target revenue'],
+        ['ebitda', 'Target EBITDA'],
+        ['enterprise_value', 'Target EV'],
+      ];
+      for (const [key, label] of labels) {
+        const r = (fc as Record<string, unknown>)[key] as Record<string, unknown> | undefined;
+        if (!r || typeof r !== 'object') continue;
+        const text = formatRange({ min: toAmount(r.min), max: toAmount(r.max), is_flexible: r.is_flexible === true });
+        if (text) items.push({ label, value: text });
+      }
+    }
     if (items.length) blocks.push({ type: 'fields', items });
     if (note) blocks.push({ type: 'text', text: clip(note, 1000) });
     if (cols.category && !fromColumn(cols.category)) {

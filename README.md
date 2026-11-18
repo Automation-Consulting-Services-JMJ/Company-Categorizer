@@ -79,7 +79,7 @@ clearly-operating business without scraping at all. Max 25 companies per
 request (`API_MAX_BATCH`).
 
 **The rule.** A stored result is returned as-is when the row is `checked` *and*
-was checked within the last `RESULT_MAX_AGE_MONTHS` (6) calendar months. "Checked
+was checked within the last `RESULT_MAX_AGE_MONTHS` (4) calendar months. "Checked
 at" is `metadata.checked_at`, or the row's `updated_at` for older rows that never
 had one. Anything else - no row, never checked, or older than that - goes through
 the normal pipeline (name screen -> scrape -> classify), is written to the row
@@ -97,9 +97,18 @@ exactly as the batch job would write it, and is then read back and returned.
   "sub_category": "SaaS",
   "note": "Target (SaaS): ...",
   "classification_source": "scrape",
-  "checked_at": "2026-08-02T10:14:09.312Z"
+  "checked_at": "2026-08-02T10:14:09.312Z",
+  "financial_criteria": {
+    "revenue":          { "min": 10000000, "max": 50000000, "is_flexible": false },
+    "ebitda":           { "min": 2000000,  "max": null,     "is_flexible": true },
+    "enterprise_value": { "min": null,     "max": null,     "is_flexible": false }
+  },
+  "financial_criteria_status": "extracted"
 }
 ```
+
+`financial_criteria` is `null` unless `financial_criteria_status` is
+`extracted` (see section 8 below).
 
 `source` is `"cache"` (served from the database) or `"fresh"` (researched just
 now). Fresh results also carry `refresh_reason`: `not_found`, `not_checked`,
@@ -437,6 +446,62 @@ Trade-offs to know about:
 - Turn it off with `NAME_SCREEN_ENABLED=false` and behaviour is identical to
   before.
 
+### 8. Financial criteria (revenue, EBITDA, enterprise value)
+
+After categorization, a second model call (`FINANCIAL_CRITERIA_SYSTEM_PROMPT`
+in `src/prompts.ts`) reads the **same scraped text** and pulls out the
+buyer's stated acquisition / investment criteria. It does not pull out the
+company's own results: "we acquire businesses with $10-50M revenue" is
+extracted, "we did $50M revenue last year" is not.
+
+Stored in `metadata`:
+
+- `financial_criteria` - `{ revenue, ebitda, enterprise_value, at }`, each
+  criterion `{ min, max, is_flexible }`. Amounts are plain numbers
+  (`$5M` -> `5000000`) in whatever currency the site used. **They are not
+  converted, and the currency is not recorded.**
+- `financial_criteria_status`:
+
+| Status | Meaning |
+|---|---|
+| `extracted` | The call ran. Ranges can still be all `null` if the site states none. |
+| `skipped_target` | Categorized as Target only (or no category): no buyer criteria to find. |
+| `not_scraped` | Settled by the name screen; no website text was read. |
+| `disabled` | `FINANCIAL_CRITERIA_ENABLED=false`. |
+| `failed` | The call or its JSON failed; reason in `financial_criteria_error`. |
+
+- A failed extraction never fails the row: the categorization is still stored
+  and the row is still `checked`. Its tokens are added to the row's counters.
+- `src/financialCriteria.ts` cleans the model's output: `"$1.5M"` style strings
+  become numbers, reversed ranges are swapped, unknown keys are dropped, and
+  anything that isn't a usable amount becomes `null`.
+
+Settings:
+
+| Variable | Default | |
+|---|---|---|
+| `FINANCIAL_CRITERIA_ENABLED` | `true` | Turn the extra call on/off. |
+| `FINANCIAL_CRITERIA_SKIP_TARGETS` | `true` | Skip Target-only rows (most of the cost saving). |
+| `FINANCIAL_CRITERIA_MAX_TOKENS` | `400` | The reply is a small fixed JSON. |
+
+Cost: each extracted row sends its scraped text to the model a second time,
+so input tokens for those rows roughly double. The system prompt (~1.7k tokens)
+is cached and pre-warmed like the others. It shares the provider's RPM limit.
+
+Querying:
+
+```sql
+SELECT metadata->>'domain',
+       (metadata->'financial_criteria'->'revenue'->>'min')::numeric AS revenue_min,
+       (metadata->'financial_criteria'->'revenue'->>'max')::numeric AS revenue_max,
+       (metadata->'financial_criteria'->'ebitda'->>'min')::numeric  AS ebitda_min
+  FROM public.company_metadata
+ WHERE metadata->>'financial_criteria_status' = 'extracted';
+```
+
+Rows checked before this change have no `financial_criteria_status`. They pick
+it up the next time they are researched (stale, or `force_refresh`).
+
 ## Layout
 
 | File | Role |
@@ -455,11 +520,12 @@ Trade-offs to know about:
 | `src/tenancy/setupPage.ts` | `GET /setup` |
 | `src/tenancy/schema.ts`, `crypto.ts` | tables; AES-256-GCM sealing, key hashing |
 | `src/domain.ts` | domain normalisation + the spellings to look up |
-| `src/pipeline.ts` | claim → name screen → scrape → classify → write back, worker pool |
+| `src/pipeline.ts` | claim → name screen → scrape → classify → financial criteria → write back, worker pool |
 | `src/llm.ts` | provider switch (`LLM_PROVIDER`) — the only file pipeline.ts/index.ts import from for LLM calls |
 | `src/claudeAgent.ts` | Anthropic backend: client, prompt caching, cache pre-warm, usage extraction |
 | `src/openaiAgent.ts` | OpenAI backend: client, automatic caching usage extraction, warm-up |
-| `src/prompts.ts` | the two system prompts, shared verbatim by both backends |
+| `src/prompts.ts` | the three system prompts (categorizer, name screen, financial criteria), shared verbatim by both backends |
+| `src/financialCriteria.ts` | financial-criteria JSON parsing/normalisation + display formatting, shared by both backends |
 | `src/categorization.ts` | categorizer JSON parsing/validation + category flattening, shared by both backends |
 | `src/nameScreen.ts` | Anthropic-backed name + domain pre-screen call |
 | `src/nameScreenParsing.ts` | name-screen input cleaning + output parsing, shared by both backends |

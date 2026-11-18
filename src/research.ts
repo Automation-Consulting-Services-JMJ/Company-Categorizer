@@ -18,6 +18,8 @@ import {
   type CompanyRecord,
 } from './db.js';
 import { processCompany } from './pipeline.js';
+import { emptyRange, toAmount } from './financialCriteria.js';
+import type { FinancialCriteria, FinancialRange } from './types.js';
 
 export type RefreshReason = 'not_found' | 'not_checked' | 'stale' | 'forced';
 
@@ -34,6 +36,22 @@ export interface Classification {
   /** "name_screen" (decided from name + domain alone) or "scrape" (from the website). */
   classification_source: string | null;
   checked_at: string | null;
+  /** Revenue / EBITDA / enterprise-value criteria; null when not extracted (see the status). */
+  financial_criteria: FinancialCriteria | null;
+  /** extracted | skipped_target | not_scraped | disabled | failed, or null for rows from before this feature. */
+  financial_criteria_status: string | null;
+}
+
+/** Reads the financial_criteria column back defensively: it is JSONB and null for older rows. */
+function financialCriteriaOf(value: unknown): FinancialCriteria | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const range = (r: unknown): FinancialRange => {
+    if (typeof r !== 'object' || r === null) return emptyRange();
+    const o = r as Record<string, unknown>;
+    return { min: toAmount(o.min), max: toAmount(o.max), is_flexible: o.is_flexible === true };
+  };
+  return { revenue: range(v.revenue), ebitda: range(v.ebitda), enterprise_value: range(v.enterprise_value) };
 }
 
 export type ResearchResult =
@@ -95,6 +113,8 @@ function classificationOf(record: CompanyRecord): Classification {
     note: str(m.note),
     classification_source: str(m.classification_source),
     checked_at: record.checkedAt ? record.checkedAt.toISOString() : null,
+    financial_criteria: financialCriteriaOf(record.financialCriteria),
+    financial_criteria_status: str(m.financial_criteria_status),
   };
 }
 
