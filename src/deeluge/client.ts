@@ -32,7 +32,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
  */
 async function call<T>(
   install: Installation,
-  method: 'GET' | 'PATCH',
+  method: 'GET' | 'PATCH' | 'POST',
   path: string,
   opts: { body?: unknown; timeoutMs: number; retries?: number }
 ): Promise<T> {
@@ -85,6 +85,32 @@ export async function patchRecord(
   opts: { timeoutMs: number; retries?: number }
 ): Promise<void> {
   await call(install, 'PATCH', `/records/${encodeURIComponent(recordId)}`, { ...opts, body: { values } });
+}
+
+/**
+ * Tells Deeluge how a record action we answered "processing" ended
+ * (POST /api/v1/actions/<id>/result). Only needed when we did not write the
+ * record: writing it already tells Deeluge it is done. Best effort: a 404
+ * means Deeluge has nothing in progress for it (already settled, expired, or a
+ * Deeluge without this endpoint), and is ignored.
+ */
+export async function reportActionResult(
+  install: Installation,
+  actionId: string,
+  status: 'done' | 'failed',
+  message: string | null
+): Promise<void> {
+  if (!/^act_[A-Za-z0-9_-]{8,64}$/.test(actionId)) return;
+  try {
+    await call(install, 'POST', `/actions/${encodeURIComponent(actionId)}/result`, {
+      body: { status, ...(message ? { message: message.slice(0, 200) } : {}) },
+      timeoutMs: 15_000,
+      retries: 3,
+    });
+  } catch (err) {
+    if (err instanceof DeelugeApiError && err.status === 404) return;
+    console.warn(`[deeluge] could not report result of ${actionId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 /* ------------------------------------------------------------- columns */

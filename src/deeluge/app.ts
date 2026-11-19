@@ -52,6 +52,7 @@ import {
   linkedCompanyId,
   nameOf,
   patchRecord,
+  reportActionResult,
   type Columns,
   type DeelugeRecord,
 } from './client.js';
@@ -307,13 +308,36 @@ async function recordAction(reg: Registration, msg: Msg, path: string): Promise<
   });
 
   // Run on many records at once: answer straight away, Deeluge sends the rest.
-  if (msg.batch) return { status: 200, body: { message: 'Queued for categorizing.' } };
+  // "processing" tells Deeluge the record is not done yet, so its cells show
+  // Processing until we write it (or report below that there was nothing to write).
+  if (msg.batch) {
+    settleLater(install, String(msg.id ?? ''), promise);
+    return { status: 202, body: { status: 'processing', message: 'Categorizing.' } };
+  }
 
   // One record: a stored result usually comes back in well under a second, so
   // wait a little and say what happened; otherwise finish in the background.
   const outcome = await within(promise, 5_000);
   if (outcome) return { status: 200, body: { message: describe(outcome) } };
-  return { status: 200, body: { message: 'Categorizing. The Category column fills in shortly - usually within a minute.' } };
+  settleLater(install, String(msg.id ?? ''), promise);
+  return {
+    status: 202,
+    body: { status: 'processing', message: 'Categorizing. The Category column fills in shortly - usually within a minute.' },
+  };
+}
+
+/**
+ * After answering "processing": when the job ends without writing the record
+ * (nothing to look up, already categorized, or it failed), tell Deeluge, so the
+ * record stops showing Processing at once with the reason. A written record
+ * needs nothing more: the write itself tells Deeluge it is done.
+ */
+function settleLater(install: Installation, actionId: string, promise: Promise<Outcome>): void {
+  if (!actionId) return;
+  void promise.then(async (outcome) => {
+    if (outcome.kind === 'written') return;
+    await reportActionResult(install, actionId, outcome.kind === 'skipped' ? 'done' : 'failed', describe(outcome));
+  });
 }
 
 async function recordEvent(reg: Registration, msg: Msg): Promise<DeelugeResponse> {
